@@ -13,9 +13,21 @@ on:
         default: 'main'
 
       ipa_url:
-        description: "URL to the decrypted IPA file"
+        description: "URL to the decrypted IPA file (leave empty when using a release asset below)"
         default: ""
-        required: true
+        required: false
+        type: string
+
+      ipa_release_tag:
+        description: "Release tag in this repository holding the IPA asset (optional)"
+        default: ""
+        required: false
+        type: string
+
+      ipa_asset_name:
+        description: "IPA asset file name inside that release (optional)"
+        default: ""
+        required: false
         type: string
 
       display_name:
@@ -114,18 +126,39 @@ jobs:
           exclude_inputs: bundle_id,display_name,youpip,ytuhd,ryd,abconfig,ytweaks,youslider,gonerino,demc,volboost,repo,branch,youquality
           
       - name: Install MEGA downloader
-        if: ${{ startsWith(inputs.ipa_url, 'https://mega.nz/') }}
+        if: ${{ !inputs.ipa_release_tag && startsWith(inputs.ipa_url, 'https://mega.nz/') }}
         run: brew install megatools
 
       - name: Download IPA from Mega share link
-        if: ${{ startsWith(inputs.ipa_url, 'https://mega.nz/') }}
+        if: ${{ !inputs.ipa_release_tag && startsWith(inputs.ipa_url, 'https://mega.nz/') }}
         env:
           IPA_URL: ${{ inputs.ipa_url }}
         run: |
           megadl --no-progress --path youtube.ipa "$IPA_URL"
 
+      - name: Download IPA from release asset
+        if: ${{ inputs.ipa_release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.ipa_release_tag }}"
+          name="${{ inputs.ipa_asset_name }}"
+          # Draft releases are not reachable through /releases/tags, so list releases and pick by tag.
+          release_id=$(gh api "repos/${{ github.repository }}/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .id" | head -1)
+          if [ -z "$release_id" ]; then
+            echo "::error::No release found with tag '$tag'."
+            exit 1
+          fi
+          asset_id=$(gh api "repos/${{ github.repository }}/releases/$release_id/assets" --jq ".[] | select(.name == \"$name\") | .id" | head -1)
+          if [ -z "$asset_id" ]; then
+            echo "::error::No asset named '$name' in release '$tag'."
+            exit 1
+          fi
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/$asset_id" -o youtube.ipa
+
       - name: Download IPA from direct URL
-        if: ${{ !startsWith(inputs.ipa_url, 'https://mega.nz/') }}
+        if: ${{ !inputs.ipa_release_tag && !startsWith(inputs.ipa_url, 'https://mega.nz/') }}
         env:
           IPA_URL: ${{ inputs.ipa_url }}
         run: |
@@ -210,7 +243,9 @@ jobs:
         run: sed -i '' 's/od -c "$i" | head/od -c "$i" 2>\/dev\/null | head/g' $THEOS/bin/convert_xml_plist.sh || true
 
       - name: Install cyan and tbd
-        run: pipx install https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+        run: |
+          pipx install https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+          pipx inject cyan Pillow
 
       - name: Checkout YouMod
         uses: actions/checkout@v7
@@ -397,7 +432,11 @@ jobs:
             tweaks="$tweaks $f"
           done
           
-          cyan -i youtube.ipa -o YouMod_${{ env.YT_VERSION }}_v${{ env.YOUMOD_VERSION }}.ipa -uwef $tweaks -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
+          cyan -i youtube.ipa -o YouMod_${{ env.YT_VERSION }}_v${{ env.YOUMOD_VERSION }}.ipa -uwef $tweaks -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} -k YouMod/Resources/icon-unlocked.png
+
+      - name: Add the missing icon scales
+        run: |
+          python3 YouMod/tools/add_icon_scales.py "YouMod_${{ env.YT_VERSION }}_v${{ env.YOUMOD_VERSION }}.ipa" YouMod/Resources/icon-unlocked-180.png YouMod/Resources/icon-unlocked-167.png
 
       - name: Create a Draft Release
         uses: softprops/action-gh-release@v3
